@@ -30,7 +30,8 @@ def load_sentence_embeddings(l_sentences, tokenizer, text_encoder, device=device
             text_input_ids = text_inputs.input_ids
             prompt_embeds = text_encoder(text_input_ids.to(device), attention_mask=None)[0]
             l_embeddings.append(prompt_embeds)
-    return torch.concatenate(l_embeddings, dim=0).mean(dim=0).unsqueeze(0)
+    # return torch.concatenate(l_embeddings, dim=0).mean(dim=0).unsqueeze(0)
+    return torch.cat(l_embeddings, dim=0).mean(dim=0).unsqueeze(0)
 
 
 if __name__=="__main__":

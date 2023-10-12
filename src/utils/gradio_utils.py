@@ -17,8 +17,11 @@ from edit_directions import construct_direction
 from edit_pipeline import EditingPipeline
 from ddim_inv import DDIMInversion
 from scheduler import DDIMInverseScheduler
-from lavis.models import load_model_and_preprocess
+# from lavis.models import load_model_and_preprocess
 from transformers import T5Tokenizer, AutoTokenizer, T5ForConditionalGeneration, BloomForCausalLM
+from transformers import Blip2Processor, Blip2ForConditionalGeneration
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import re
 
 
 
@@ -48,7 +51,7 @@ def load_sentence_embeddings(l_sentences, tokenizer, text_encoder, device="cuda"
             text_input_ids = text_inputs.input_ids
             prompt_embeds = text_encoder(text_input_ids.to(device), attention_mask=None)[0]
             l_embeddings.append(prompt_embeds)
-    return torch.concatenate(l_embeddings, dim=0).mean(dim=0).unsqueeze(0)
+    return torch.cat(l_embeddings, dim=0).mean(dim=0).unsqueeze(0)
 
 
 """
@@ -151,27 +154,59 @@ def gpt3_compute_word2sentences(task_type, word, num=100):
     Returns:
         list of str: List of generated sentences.
 """
+# def flant5xl_compute_word2sentences(word, num=100):
+#     text_input = f"Provide a caption for images containing a {word}. The captions should be in English and should be no longer than 150 characters. The caption must contain the word {word}. Caption:"
+#     l_sentences = []
+#     tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-xl")
+#     model = T5ForConditionalGeneration.from_pretrained("google/flan-t5-xl", device_map="auto", torch_dtype=torch.float16)
+#     input_ids = tokenizer(text_input, return_tensors="pt").input_ids.to("cuda")
+#     input_length = input_ids.shape[1]
+#     while True:
+#         try:
+#             outputs = model.generate(input_ids,temperature=0.95, num_return_sequences=16, do_sample=True, max_length=128, min_length=15, eta_cutoff=1e-5)
+#             # output = tokenizer.batch_decode(outputs[:, input_length:], skip_special_tokens=True)
+#             output = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+#         except:
+#             continue
+#         for line in output:
+#             line = line.strip()
+#             # print(line)
+#             l_sentences.append(line)
+#         print(len(l_sentences))
+#         if len(l_sentences)>=num:
+#             break
+#     l_sentences = clean_l_sentences(l_sentences)
+#     del model
+#     del tokenizer
+#     torch.cuda.empty_cache()
+
+#     return l_sentences
+
 def flant5xl_compute_word2sentences(word, num=100):
-    text_input = f"Provide a caption for images containing a {word}. The captions should be in English and should be no longer than 150 characters. The caption must contain the word {word}. Caption:"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    text_input = f"Provide 20 captions for images containing a '{word}'. The captions should be in English and should be no longer than 150 characters. The captions must contain the word '{word}'.\n"
     l_sentences = []
-    tokenizer = T5Tokenizer.from_pretrained("google/flan-t5-xl")
-    model = T5ForConditionalGeneration.from_pretrained("google/flan-t5-xl", device_map="auto", torch_dtype=torch.float16)
-    input_ids = tokenizer(text_input, return_tensors="pt").input_ids.to("cuda")
-    input_length = input_ids.shape[1]
-    while True:
-        try:
-            outputs = model.generate(input_ids,temperature=0.95, num_return_sequences=16, do_sample=True, max_length=128, min_length=15, eta_cutoff=1e-5)
-            # output = tokenizer.batch_decode(outputs[:, input_length:], skip_special_tokens=True)
-            output = tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        except:
-            continue
-        for line in output:
-            line = line.strip()
-            # print(line)
-            l_sentences.append(line)
+    model = AutoModelForCausalLM.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
+    tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-Instruct-v0.1")
+
+    messages = [
+        {"role": "user", 
+        "content": text_input},
+    ]
+
+    encodeds = tokenizer.apply_chat_template(messages, return_tensors="pt")
+    model_inputs = encodeds.to(device)
+    model.to(device)
+    while len(l_sentences)<num:
+        generated_ids = model.generate(model_inputs, max_new_tokens=1500, do_sample=True)
+        decoded = tokenizer.batch_decode(generated_ids)
+        sentences = decoded[0].split("[/INST]")[1].strip()[:-4].splitlines()
+        sentences = [re.sub('^[0-9]+\. ?','',s) for s in sentences]
+        sentences = [e for e in sentences if len(e)>0]
+        l_sentences += sentences
         print(len(l_sentences))
-        if len(l_sentences)>=num:
-            break
+        
+        
     l_sentences = clean_l_sentences(l_sentences)
     del model
     del tokenizer
@@ -195,7 +230,7 @@ def bloomz_compute_sentences(word, num=100):
     tokenizer = AutoTokenizer.from_pretrained("bigscience/bloomz-7b1")
     model = BloomForCausalLM.from_pretrained("bigscience/bloomz-7b1", device_map="auto", torch_dtype=torch.float16)
     text_input = f"Provide a caption for images containing a {word}. The captions should be in English and should be no longer than 150 characters. The caption must contain the word {word}. Caption:"
-    input_ids = tokenizer(input_text, return_tensors="pt").input_ids.to("cuda")
+    input_ids = tokenizer(text_input, return_tensors="pt").input_ids.to("cuda")
     input_length = input_ids.shape[1]
     t = 0.95
     eta = 1e-5
@@ -373,10 +408,22 @@ def launch_main(img_in_real, img_in_synth, src, src_custom, dest, dest_custom, n
         # make the caption if it hasn't been made before
         if not os.path.exists(caption_fname):
             # BLIP
-            model_blip, vis_processors, _ = load_model_and_preprocess(name="blip_caption", model_type="base_coco", is_eval=True, device=torch.device("cuda"))
-            _image = vis_processors["eval"](img_in_real).unsqueeze(0).cuda()
-            prompt_str = model_blip.generate({"image": _image})[0]
-            del model_blip
+            # model_blip, vis_processors, _ = load_model_and_preprocess(name="blip_caption", model_type="base_coco", is_eval=True, device=torch.device("cuda"))
+            # _image = vis_processors["eval"](img_in_real).unsqueeze(0).cuda()
+            # prompt_str = model_blip.generate({"image": _image})[0]
+            vis_processors = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b-coco")
+            model_blip = Blip2ForConditionalGeneration.from_pretrained(
+                "Salesforce/blip2-opt-2.7b-coco", torch_dtype=torch.float16
+            )
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model_blip.to(device)
+            inputs = vis_processors(images=img_in_real, return_tensors="pt").to(device, torch.float16)
+
+            generated_ids = model_blip.generate(**inputs)
+            generated_text = vis_processors.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+
+            prompt_str = generated_text
+            del model_blip, vis_processors
             torch.cuda.empty_cache()
             with open(caption_fname, "w") as f:
                 f.write(prompt_str)
